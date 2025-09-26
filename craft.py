@@ -80,6 +80,16 @@ class CRAFT(nn.Module):
         return y.permute(0,2,3,1), feature
 
 if __name__ == '__main__':
-    model = CRAFT(pretrained=True).cuda()
-    output, _ = model(torch.randn(1, 3, 768, 768).cuda())
-    print(output.shape)
+    # 1. Automatically detect and set the device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Running on device: {device}")
+
+    # 2. Move the model to the selected device
+    model = CRAFT(pretrained=True).to(device)
+
+    # 3. Create a dummy tensor and move it to the same device
+    input_tensor = torch.randn(1, 3, 768, 768).to(device)
+    
+    # 4. Run inference
+    output, _ = model(input_tensor)
+    print("Output shape:", output.shape)

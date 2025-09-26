@@ -1,4 +1,4 @@
-"""  
+""" 
 Copyright (c) 2019-present NAVER Corp.
 MIT License
 """
@@ -43,7 +43,7 @@ def str2bool(v):
     return v.lower() in ("yes", "y", "true", "t", "1")
 
 parser = argparse.ArgumentParser(description='CRAFT Text Detection')
-parser.add_argument('--trained_model', default='weights/craft_mlt_25k.pth', type=str, help='pretrained model')
+parser.add_argument('--trained_model', default='craft_mlt_25k.pth', type=str, help='pretrained model')
 parser.add_argument('--text_threshold', default=0.7, type=float, help='text confidence threshold')
 parser.add_argument('--low_text', default=0.4, type=float, help='text low-bound score')
 parser.add_argument('--link_threshold', default=0.4, type=float, help='link confidence threshold')
@@ -55,18 +55,21 @@ parser.add_argument('--show_time', default=False, action='store_true', help='sho
 parser.add_argument('--test_folder', default='/data/', type=str, help='folder path to input images')
 parser.add_argument('--refine', default=False, action='store_true', help='enable link refiner')
 parser.add_argument('--refiner_model', default='weights/craft_refiner_CTW1500.pth', type=str, help='pretrained refiner model')
+# <<< THIS LINE IS ADDED to accept the result folder path
+parser.add_argument('--result_folder', default='./result/', type=str, help='folder path to store results')
 
 args = parser.parse_args()
 
 
-""" For test images in a folder """
-image_list, _, _ = file_utils.get_files(args.test_folder)
+# This part is moved inside the main block to use the new argument
+# """ For test images in a folder """
+# image_list, _, _ = file_utils.get_files(args.test_folder)
 
-result_folder = './result/'
-if not os.path.isdir(result_folder):
-    os.mkdir(result_folder)
+# result_folder = './result/'
+# if not os.path.isdir(result_folder):
+#     os.mkdir(result_folder)
 
-def test_net(net, image, text_threshold, link_threshold, low_text, cuda, poly, refine_net=None):
+def test_net(net, image, text_threshold, link_threshold, low_text, device, poly, refine_net=None):
     t0 = time.time()
 
     # resize
@@ -76,9 +79,8 @@ def test_net(net, image, text_threshold, link_threshold, low_text, cuda, poly, r
     # preprocessing
     x = imgproc.normalizeMeanVariance(img_resized)
     x = torch.from_numpy(x).permute(2, 0, 1)    # [h, w, c] to [c, h, w]
-    x = Variable(x.unsqueeze(0))                # [c, h, w] to [b, c, h, w]
-    if cuda:
-        x = x.cuda()
+    x = x.unsqueeze(0)                         # [c, h, w] to [b, c, h, w]
+    x = x.to(device)
 
     # forward pass
     with torch.no_grad():
@@ -120,48 +122,54 @@ def test_net(net, image, text_threshold, link_threshold, low_text, cuda, poly, r
 
 
 if __name__ == '__main__':
-    # load net
-    net = CRAFT()     # initialize
+    # 1. ---- Automatic Device Detection (The Modern Way) ----
+    device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
+    print(f"Running on device: {device}")
 
+
+    # 2. ---- Load Main CRAFT Model ----
+    net = CRAFT()
     print('Loading weights from checkpoint (' + args.trained_model + ')')
-    if args.cuda:
-        net.load_state_dict(copyStateDict(torch.load(args.trained_model)))
-    else:
-        net.load_state_dict(copyStateDict(torch.load(args.trained_model, map_location='cpu')))
-
-    if args.cuda:
-        net = net.cuda()
+    # Added weights_only=True to handle the FutureWarning
+    net.load_state_dict(copyStateDict(torch.load(args.trained_model, map_location=device, weights_only=True)))
+    net = net.to(device)
+    if device.type == 'cuda':
         net = torch.nn.DataParallel(net)
         cudnn.benchmark = False
-
     net.eval()
 
-    # LinkRefiner
+
+    # 3. ---- Load Refiner Model (if enabled) ----
     refine_net = None
     if args.refine:
         from refinenet import RefineNet
         refine_net = RefineNet()
         print('Loading weights of refiner from checkpoint (' + args.refiner_model + ')')
-        if args.cuda:
-            refine_net.load_state_dict(copyStateDict(torch.load(args.refiner_model)))
-            refine_net = refine_net.cuda()
+        refine_net.load_state_dict(copyStateDict(torch.load(args.refiner_model, map_location=device, weights_only=True)))
+        refine_net = refine_net.to(device)
+        if device.type == 'cuda':
             refine_net = torch.nn.DataParallel(refine_net)
-        else:
-            refine_net.load_state_dict(copyStateDict(torch.load(args.refiner_model, map_location='cpu')))
-
         refine_net.eval()
         args.poly = True
 
-    t = time.time()
 
-    # load data
+    # 4. ---- Prepare Image List and Result Folder (Proper Structure) ----
+    # <<< THIS LINE IS CHANGED to use the new argument
+    result_folder = args.result_folder
+    if not os.path.isdir(result_folder):
+        os.makedirs(result_folder, exist_ok=True)
+    
+    image_list, _, _ = file_utils.get_files(args.test_folder)
+
+    # 5. ---- Run Inference Loop ----
+    t = time.time()
     for k, image_path in enumerate(image_list):
         print("Test image {:d}/{:d}: {:s}".format(k+1, len(image_list), image_path), end='\r')
         image = imgproc.loadImage(image_path)
 
-        bboxes, polys, score_text = test_net(net, image, args.text_threshold, args.link_threshold, args.low_text, args.cuda, args.poly, refine_net)
+        bboxes, polys, score_text = test_net(net, image, args.text_threshold, args.link_threshold, args.low_text, device, args.poly, refine_net)
 
-        # save score text
+        # Save score text
         filename, file_ext = os.path.splitext(os.path.basename(image_path))
         mask_file = result_folder + "/res_" + filename + '_mask.jpg'
         cv2.imwrite(mask_file, score_text)
